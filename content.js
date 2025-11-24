@@ -1,7 +1,7 @@
 (async function () {
     if (document.getElementById("myOptionBar")) return;
 
-    // === UTILS ===
+    /* ========================== UTILS ============================= */
     function createBtn(label, onClick) {
         const btn = document.createElement("button");
         btn.textContent = label;
@@ -9,9 +9,10 @@
         return btn;
     }
 
-    const playingTabs = new Set(); // các tab đang phát
+    const playingTabs = new Set();
+    const SELECTED_COLOR = "#1e7f1e"; // selected màu tối hơn
 
-    // === INDEXEDDB LOGIC ===
+    /* ====================== INDEXEDDB LOGIC ======================== */
     function openDB() {
         return new Promise((resolve, reject) => {
             const req = indexedDB.open("YTOptionBarDB", 1);
@@ -35,7 +36,7 @@
         return new Promise((resolve, reject) => {
             const tx = db.transaction("options", "readwrite");
             tx.objectStore("options").put(opt);
-            tx.oncomplete = () => resolve();
+            tx.oncomplete = resolve;
             tx.onerror = (e) => reject(e.target.error);
         });
     }
@@ -55,13 +56,28 @@
         return new Promise((resolve, reject) => {
             const tx = db.transaction("options", "readwrite");
             tx.objectStore("options").delete(id);
-            tx.oncomplete = () => resolve();
+            tx.oncomplete = resolve;
             tx.onerror = (e) => reject(e.target.error);
         });
     }
 
-    // === AUDIO MANAGER ===
+    /* ======================= AUDIO/YT HANDLER ======================= */
     const audioMap = {};
+
+    function parseYTID(url) {
+        const match = url.match(/[?&]v=([^&]+)/);
+        return match ? match[1] : url;
+    }
+
+    function applyColors(btn, opt) {
+        if (playingTabs.has(btn)) {
+            btn.style.background = opt.playColor || "lime";
+        } else if (btn.classList.contains("selected")) {
+            btn.style.background = SELECTED_COLOR;
+        } else {
+            btn.style.background = opt.color || "#555";
+        }
+    }
 
     function playPause(opt, tabBtn) {
         let isPlaying = false;
@@ -98,26 +114,14 @@
             if (opt.volume != null) opt.youtubePlayer.setVolume(opt.volume * 100);
         }
 
-        // hiệu ứng mở
-        tabBtn.style.boxShadow = "0 0 10px 2px yellow";
-        setTimeout(() => (tabBtn.style.boxShadow = ""), 500);
+        // cập nhật trạng thái play
+        if (isPlaying) playingTabs.add(tabBtn);
+        else playingTabs.delete(tabBtn);
 
-        // cập nhật màu tab play
-        if (isPlaying) {
-            playingTabs.add(tabBtn);
-            tabBtn.style.background = opt.playColor || "lime";
-        } else {
-            playingTabs.delete(tabBtn);
-            tabBtn.style.background = opt.color || "#444";
-        }
+        applyColors(tabBtn, opt);
     }
 
-    function parseYTID(url) {
-        const match = url.match(/[?&]v=([^&]+)/);
-        return match ? match[1] : url;
-    }
-
-    // === CREATE OPTION ELEMENT ===
+    /* ======================= CREATE OPTION ========================== */
     async function createOptionElement(bar, opt, insertAfter = null) {
         const btn = document.createElement("button");
         btn.textContent = opt.name;
@@ -130,19 +134,7 @@
         btn.style.alignItems = "center";
         btn.style.gap = "5px";
         btn.style.position = "relative";
-
-        // CLICK TAB = chọn + play/pause
-        btn.onclick = (e) => {
-            e.stopPropagation();
-
-            // clear selected cũ
-            bar.querySelectorAll("button.selected").forEach((b) =>
-                b.classList.remove("selected")
-            );
-
-            btn.classList.add("selected");
-            playPause(opt, btn);
-        };
+        btn._optRef = opt;
 
         // volume slider
         const volInput = document.createElement("input");
@@ -163,189 +155,169 @@
         // menu button
         const menuBtn = document.createElement("span");
         menuBtn.textContent = "⋮";
+        menuBtn.classList.add("menu-btn");
         menuBtn.style.cursor = "pointer";
-        menuBtn.style.marginLeft = "5px";
+        menuBtn.style.padding = "5px 8px";
+        menuBtn.style.userSelect = "none";
         btn.appendChild(menuBtn);
 
-        // POPUP MENU
+        // popup menu
         const menu = document.createElement("div");
+        menu.classList.add("menu-popup");
         menu.style.display = "none";
         menu.style.position = "fixed";
         menu.style.flexDirection = "column";
         menu.style.background = "#333";
         menu.style.border = "1px solid #555";
         menu.style.padding = "5px";
+        menu.style.borderRadius = "4px";
         menu.style.zIndex = 99999999;
 
-        function makeMenuItem(label, handler) {
+        function makeItem(label, handler) {
             const item = document.createElement("div");
             item.textContent = label;
             item.style.cursor = "pointer";
+            item.style.padding = "4px 6px";
+            item.onmouseenter = () => (item.style.background = "#444");
+            item.onmouseleave = () => (item.style.background = "none");
             item.onclick = handler;
             return item;
         }
 
-        menu.appendChild(
-            makeMenuItem("Sửa tên", (e) => {
-                e.stopPropagation();
-                const newName = prompt("Tên mới:", opt.name);
-                if (newName) {
-                    opt.name = newName;
-                    btn.childNodes[0].nodeValue = newName;
+        menu.appendChild(makeItem("Sửa tên", (e) => {
+            e.stopPropagation();
+            const newName = prompt("Tên mới:", opt.name);
+            if (newName) {
+                opt.name = newName;
+                btn.childNodes[0].nodeValue = newName;
+                saveOption(opt);
+            }
+            menu.style.display = "none";
+        }));
+
+        menu.appendChild(makeItem("Đổi màu", (e) => {
+            e.stopPropagation();
+            const newColor = prompt("Màu nền:", opt.color || "#444");
+            if (newColor) {
+                opt.color = newColor;
+                applyColors(btn, opt);
+                saveOption(opt);
+            }
+            menu.style.display = "none";
+        }));
+
+        menu.appendChild(makeItem("Màu khi phát", (e) => {
+            e.stopPropagation();
+            const choice = prompt("Chọn màu (lime/yellow/orange/red/cyan/magenta):", opt.playColor || "lime");
+            const ok = ["lime", "yellow", "orange", "red", "cyan", "magenta"];
+            if (choice && ok.includes(choice)) {
+                opt.playColor = choice;
+                saveOption(opt);
+            }
+            menu.style.display = "none";
+        }));
+
+        menu.appendChild(makeItem("Upload file / YouTube", async (e) => {
+            e.stopPropagation();
+            const choice = confirm("OK = Upload file audio\nCancel = Nhập link YouTube");
+            if (choice) {
+                const input = document.createElement("input");
+                input.type = "file";
+                input.accept = "audio/*";
+                input.onchange = () => {
+                    opt.type = "file";
+                    opt.file = input.files[0];
                     saveOption(opt);
-                }
-                menu.style.display = "none";
-            })
-        );
+                };
+                input.click();
+            } else {
+                const url = prompt("Link YouTube:");
+                if (url) {
+                    opt.type = "youtube";
+                    opt.youtubeURL = url;
+                    const id = `yt-${opt.id}`;
+                    const div = document.createElement("div");
+                    div.style.display = "none";
+                    div.id = id;
+                    document.body.appendChild(div);
 
-        menu.appendChild(
-            makeMenuItem("Đổi màu", (e) => {
-                e.stopPropagation();
-                const newColor = prompt("Màu nền:", opt.color || "#444");
-                if (newColor) {
-                    opt.color = newColor;
-                    btn.style.background = newColor;
-                    saveOption(opt);
-                }
-                menu.style.display = "none";
-            })
-        );
-
-        menu.appendChild(
-            makeMenuItem("Màu khi phát", (e) => {
-                e.stopPropagation();
-                const colors = ["lime", "yellow", "orange", "red", "cyan", "magenta"];
-                const choice = prompt(
-                    "Chọn màu (lime/yellow/orange/red/cyan/magenta):",
-                    opt.playColor || "lime"
-                );
-                if (choice && colors.includes(choice)) {
-                    opt.playColor = choice;
-                    saveOption(opt);
-                }
-                menu.style.display = "none";
-            })
-        );
-
-        menu.appendChild(
-            makeMenuItem("Upload file / YouTube", async (e) => {
-                e.stopPropagation();
-                const choice = confirm(
-                    "OK = Upload file audio\nCancel = Nhập link YouTube"
-                );
-                if (choice) {
-                    const input = document.createElement("input");
-                    input.type = "file";
-                    input.accept = "audio/*";
-                    input.onchange = () => {
-                        opt.type = "file";
-                        opt.file = input.files[0];
-                        saveOption(opt);
-                    };
-                    input.click();
-                } else {
-                    const url = prompt("Nhập link YouTube:");
-                    if (url) {
-                        opt.type = "youtube";
-                        opt.youtubeURL = url;
-
-                        const div = document.createElement("div");
-                        div.style.display = "none";
-                        const id = `ytplayer-${opt.id}`;
-                        div.id = id;
-                        document.body.appendChild(div);
-
-                        function createPlayer() {
-                            opt.youtubePlayer = new YT.Player(id, {
-                                height: "0",
-                                width: "0",
-                                videoId: parseYTID(url)
-                            });
-                        }
-
-                        if (window.YT && YT.Player) createPlayer();
-                        else {
-                            const tag = document.createElement("script");
-                            tag.src = "https://www.youtube.com/iframe_api";
-                            window.onYouTubeIframeAPIReady = createPlayer;
-                            document.body.appendChild(tag);
-                        }
-
-                        saveOption(opt);
+                    function createPlayer() {
+                        opt.youtubePlayer = new YT.Player(id, { height: "0", width: "0", videoId: parseYTID(url) });
                     }
-                }
-                menu.style.display = "none";
-            })
-        );
 
-        menu.appendChild(
-            makeMenuItem("Xóa", async (e) => {
-                e.stopPropagation();
-                if (confirm("Xóa option này?")) {
-                    await deleteOption(opt.id);
-                    btn.remove();
+                    if (window.YT && YT.Player) createPlayer();
+                    else {
+                        const tag = document.createElement("script");
+                        tag.src = "https://www.youtube.com/iframe_api";
+                        window.onYouTubeIframeAPIReady = createPlayer;
+                        document.body.appendChild(tag);
+                    }
+                    saveOption(opt);
                 }
-                menu.style.display = "none";
-            })
-        );
+            }
+            menu.style.display = "none";
+        }));
+
+        menu.appendChild(makeItem("Xóa", async (e) => {
+            e.stopPropagation();
+            if (confirm("Xóa option này?")) {
+                await deleteOption(opt.id);
+                btn.remove();
+            }
+            menu.style.display = "none";
+        }));
 
         btn.appendChild(menu);
 
-        // MỞ POPUP MENU (luôn nổi)
-menuBtn.onclick = (e) => {
-    e.stopPropagation();
-
-    // show menu tạm để lấy kích thước
-    menu.style.display = "flex";
-    menu.style.position = "fixed";
-    menu.style.zIndex = 99999999;
-
-    const r = btn.getBoundingClientRect();
-    const mW = menu.offsetWidth;
-    const mH = menu.offsetHeight;
-    const viewportW = window.innerWidth;
-    const viewportH = window.innerHeight;
-
-    // vị trí mặc định
-    let top = r.bottom + 5;
-    let left = r.left;
-
-    // === CLAMP X (ngang) ===
-    if (left + mW > viewportW) {
-        left = viewportW - mW - 8; // tránh mép 8px
-    }
-    if (left < 0) left = 8;
-
-    // === CLAMP Y (dọc) ===
-    if (top + mH > viewportH) {
-        top = r.top - mH - 5; // đổi popup lên trên nút
-    }
-    if (top < 0) top = 8;
-
-    menu.style.top = top + "px";
-    menu.style.left = left + "px";
-};
-
-
-        document.addEventListener("click", (e) => {
-            if (!menu.contains(e.target) && e.target !== menuBtn) {
+        // toggle menu + clamp
+        menuBtn.onclick = (e) => {
+            e.stopPropagation();
+            if (menu.style.display === "flex") {
                 menu.style.display = "none";
+                return;
             }
+            menu.style.display = "flex";
+            const r = menuBtn.getBoundingClientRect();
+            const mW = menu.offsetWidth;
+            const mH = menu.offsetHeight;
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+
+            let left = r.right - mW;
+            let top = r.bottom + 4;
+
+            if (left < 6) left = 6;
+            if (left + mW > vw - 6) left = vw - mW - 6;
+            if (top + mH > vh) top = r.top - mH - 6;
+            if (top < 6) top = 6;
+
+            menu.style.left = left + "px";
+            menu.style.top = top + "px";
+        };
+
+        // chọn tab
+        btn.addEventListener("click", (e) => {
+            if (e.target.classList.contains("menu-btn")) return;
+
+            bar.querySelectorAll("button.selected").forEach(b => {
+                b.classList.remove("selected");
+                applyColors(b, b._optRef);
+            });
+
+            btn.classList.add("selected");
+            applyColors(btn, opt);
+
+            playPause(opt, btn);
         });
 
-        // ==== INSERT TAB LOGIC ====
         const addBtn = bar.querySelector("#addBtn");
-
-        if (insertAfter && insertAfter !== addBtn) {
-            bar.insertBefore(btn, insertAfter.nextSibling);
-        } else {
-            bar.insertBefore(btn, addBtn);
-        }
+        if (insertAfter && insertAfter !== addBtn) bar.insertBefore(btn, insertAfter.nextSibling);
+        else bar.insertBefore(btn, addBtn);
 
         return btn;
     }
 
-    // === CREATE BAR ===
+    /* ========================= CREATE BAR ============================ */
     const bar = document.createElement("div");
     bar.id = "myOptionBar";
     bar.style.position = "fixed";
@@ -362,49 +334,55 @@ menuBtn.onclick = (e) => {
     bar.style.fontFamily = "Arial,sans-serif";
     bar.style.boxShadow = "0 -2px 6px rgba(0,0,0,0.3)";
     document.body.appendChild(bar);
-
     document.body.style.paddingBottom = "80px";
 
-    // MINIMIZE BUTTON
-    const minBtn = document.createElement("span");
+    // minimize button floating
+    const minBtn = document.createElement("div");
     minBtn.textContent = "🗕";
+    minBtn.style.position = "fixed";
+    minBtn.style.right = "12px";
+    minBtn.style.bottom = "70px";
+    minBtn.style.background = "#222";
+    minBtn.style.padding = "6px 12px";
+    minBtn.style.borderRadius = "6px";
     minBtn.style.cursor = "pointer";
-    minBtn.style.marginLeft = "auto";
+    minBtn.style.zIndex = 100000;
+    minBtn.style.boxShadow = "0 0 6px rgba(0,0,0,0.4)";
+    document.body.appendChild(minBtn);
+
     minBtn.onclick = () => {
-        if (bar.style.height === "30px") {
+        const collapsed = bar.getAttribute("data-minimized") === "1";
+        if (collapsed) {
             bar.style.height = "auto";
             bar.style.overflow = "visible";
+            bar.removeAttribute("data-minimized");
         } else {
-            bar.style.height = "30px";
+            bar.style.height = "32px";
             bar.style.overflow = "hidden";
+            bar.setAttribute("data-minimized", "1");
         }
     };
-    bar.appendChild(minBtn);
 
-    // ADD BUTTON
+    // add button
     const addBtn = createBtn("+", async () => {
         const selectedBtn = bar.querySelector("button.selected") || null;
-        const newOpt = {
-            name: "New Option",
-            type: "file",
-            file: null,
-            volume: 1,
-            color: "#444"
-        };
+        const newOpt = { name: "New Option", type: "file", file: null, volume: 1, color: "#444", playColor: "lime" };
         await saveOption(newOpt);
-
         const newBtn = await createOptionElement(bar, newOpt, selectedBtn);
 
-        // đánh dấu selected tab mới tạo
-        bar.querySelectorAll("button.selected").forEach((b) =>
-            b.classList.remove("selected")
-        );
+        bar.querySelectorAll("button.selected").forEach((b) => b.classList.remove("selected"));
         newBtn.classList.add("selected");
+        applyColors(newBtn, newOpt);
     });
     addBtn.id = "addBtn";
     bar.appendChild(addBtn);
 
-    // LOAD OPTIONS
+    // load options
     const options = await loadOptions();
     for (let opt of options) createOptionElement(bar, opt);
+
+    // click ra ngoài để đóng menu
+    document.addEventListener("click", () => {
+        document.querySelectorAll(".menu-popup").forEach(m => m.style.display = "none");
+    });
 })();
