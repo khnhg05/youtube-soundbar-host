@@ -1,17 +1,20 @@
+/* Thanh option cố định ở dưới cùng */
 #myOptionBar {
     position: fixed;
-    top: 0;
+    bottom: 0;       /* đặt ở dưới cùng */
     left: 0;
     width: 100%;
     background: #222;
     color: #fff;
-    padding: 5px 10px;
+    padding: 8px 12px;   /* padding để dễ bấm */
     z-index: 9999;
     display: flex;
     gap: 10px;
     font-family: Arial, sans-serif;
+    box-shadow: 0 -2px 6px rgba(0,0,0,0.3); /* shadow hướng lên */
 }
 
+/* Các nút bên trong thanh */
 #myOptionBar button {
     padding: 5px 10px;
     border: none;
@@ -19,13 +22,20 @@
     cursor: pointer;
     background: #555;
     color: #fff;
+    transition: background 0.2s;
 }
 
 #myOptionBar button:hover {
     background: #777;
 }
 
+/* Nút đóng */
 #myOptionBar .closeBtn {
     margin-left: auto;
     cursor: pointer;
+}
+
+/* Đẩy nội dung lên để không bị che bởi thanh dưới */
+body {
+    padding-bottom: 60px !important;  /* bằng hoặc lớn hơn chiều cao thanh */
 }
