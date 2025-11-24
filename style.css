@@ -1,0 +1,31 @@
+#myOptionBar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    background: #222;
+    color: #fff;
+    padding: 5px 10px;
+    z-index: 9999;
+    display: flex;
+    gap: 10px;
+    font-family: Arial, sans-serif;
+}
+
+#myOptionBar button {
+    padding: 5px 10px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    background: #555;
+    color: #fff;
+}
+
+#myOptionBar button:hover {
+    background: #777;
+}
+
+#myOptionBar .closeBtn {
+    margin-left: auto;
+    cursor: pointer;
+}
