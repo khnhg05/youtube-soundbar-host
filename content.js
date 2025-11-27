@@ -188,9 +188,19 @@
         state.setAudio(option.id, audio);
       }
 
+      // Ensure volume is always up to date
+      audio.volume = option.volume ?? CONFIG.DEFAULT_VOLUME;
+
       const playing = !audio.paused;
-      if (playing) audio.pause();
-      else audio.play();
+      if (playing) {
+        audio.pause();
+      } else {
+        // Resume from current position, don't restart
+        audio.play().catch(err => {
+          console.error("Failed to play audio:", err);
+          alert("Không thể phát file audio!");
+        });
+      }
 
       state.setPlaying(button, !playing);
       return !playing;
@@ -471,6 +481,9 @@
       input.onchange = async () => {
         const file = input.files[0];
         if (!file) return;
+
+        // Cleanup old audio before setting new file
+        MediaPlayer.cleanup(this.option);
 
         this.option.file = file;
         await Database.save(this.option);
