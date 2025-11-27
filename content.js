@@ -8,6 +8,9 @@
 
   /* ========================== CONSTANTS ============================= */
   const CONFIG = {
+    KEYBOARD: {
+      DEFAULT_KEYS: ['1','2','3','4','5','6','7','8','9','q','w','e','r','t','y','u','i','o','p','a','s','d','f','g','h','j','k','l','z','x','c','v','b','n','m']
+    },
     COLORS: {
       DEFAULT: "#666",
       DEFAULT_PLAY: "lime",
@@ -85,6 +88,8 @@
     constructor() {
       this.audioMap = new Map();
       this.playingTabs = new Set();
+      this.keyboardMap = new Map(); // key -> option button
+      this.optionButtons = []; // track order for auto-assignment
     }
 
     getAudio(id) {
@@ -108,6 +113,56 @@
     setPlaying(btn, playing) {
       if (playing) this.playingTabs.add(btn);
       else this.playingTabs.delete(btn);
+    }
+
+    // Keyboard shortcut management
+    assignKeyToOption(optionButton, key = null) {
+      // Remove any existing key assignment for this option
+      for (const [k, btn] of this.keyboardMap) {
+        if (btn === optionButton) {
+          this.keyboardMap.delete(k);
+          break;
+        }
+      }
+
+      // Auto-assign if no key specified
+      if (!key) {
+        const index = this.optionButtons.indexOf(optionButton);
+        if (index >= 0 && index < CONFIG.KEYBOARD.DEFAULT_KEYS.length) {
+          key = CONFIG.KEYBOARD.DEFAULT_KEYS[index];
+        }
+      }
+
+      if (key) {
+        this.keyboardMap.set(key.toLowerCase(), optionButton);
+        return key;
+      }
+      return null;
+    }
+
+    removeOptionFromKeyboard(optionButton) {
+      for (const [key, btn] of this.keyboardMap) {
+        if (btn === optionButton) {
+          this.keyboardMap.delete(key);
+          break;
+        }
+      }
+      const index = this.optionButtons.indexOf(optionButton);
+      if (index >= 0) {
+        this.optionButtons.splice(index, 1);
+      }
+    }
+
+    addOptionButton(optionButton) {
+      this.optionButtons.push(optionButton);
+      return this.assignKeyToOption(optionButton);
+    }
+
+    getKeyForOption(optionButton) {
+      for (const [key, btn] of this.keyboardMap) {
+        if (btn === optionButton) return key;
+      }
+      return null;
     }
   }
 
@@ -261,9 +316,13 @@
       this.option = option;
       this.element = null;
       this.menu = null;
+      this.keyboardKey = null;
     }
 
     async create() {
+      // Register this button and get auto-assigned key
+      this.keyboardKey = state.addOptionButton(this);
+
       const btn = document.createElement("button");
       btn.style.cssText = `
         background:${this.option.color || CONFIG.COLORS.DEFAULT};
@@ -271,6 +330,14 @@
         display:flex; align-items:center; gap:5px; position:relative;
       `;
       btn._optRef = this.option;
+
+      const keySpan = document.createElement("span");
+      keySpan.style.cssText = `
+        background:rgba(0,0,0,0.3); padding:2px 4px; border-radius:3px;
+        font-size:10px; min-width:12px; text-align:center;
+      `;
+      keySpan.textContent = this.keyboardKey || '';
+      btn.appendChild(keySpan);
 
       const nameSpan = document.createElement("span");
       nameSpan.textContent = this.option.name;
@@ -282,7 +349,7 @@
       const menuBtn = this.createMenuButton();
       btn.appendChild(menuBtn);
 
-      this.menu = await this.createMenu(nameSpan);
+      this.menu = await this.createMenu(nameSpan, keySpan);
 
       btn.onclick = (e) => {
         if (e.target.classList.contains("menu-btn")) return;
@@ -326,7 +393,7 @@
       return b;
     }
 
-    async createMenu(nameSpan) {
+    async createMenu(nameSpan, keySpan) {
       const m = document.createElement("div");
       m.classList.add("menu-popup");
       m.style.cssText = `
@@ -338,6 +405,9 @@
 
       m.appendChild(
         UIUtils.createMenuItem("Sửa tên", () => this.handleRename(nameSpan))
+      );
+      m.appendChild(
+        UIUtils.createMenuItem("Đổi phím tắt", () => this.handleChangeKey(keySpan))
       );
       m.appendChild(
         UIUtils.createMenuItem("Đổi màu nền", () => this.handleChangeColor())
@@ -388,6 +458,32 @@
         this.option.name = newName.trim();
         nameSpan.textContent = this.option.name;
         await Database.save(this.option);
+      }
+    }
+
+    async handleChangeKey(keySpan) {
+      const currentKey = state.getKeyForOption(this) || '';
+      const newKey = prompt(`Phím tắt hiện tại: "${currentKey}"\nNhập phím tắt mới (a-z, 0-9):`, currentKey);
+      
+      if (newKey === null) return; // user cancelled
+      
+      if (newKey === '') {
+        // Remove custom key, revert to auto-assignment
+        const autoKey = state.assignKeyToOption(this);
+        keySpan.textContent = autoKey || '';
+        this.keyboardKey = autoKey;
+      } else if (/^[a-z0-9]$/i.test(newKey)) {
+        const key = newKey.toLowerCase();
+        // Check if key is already used
+        if (state.keyboardMap.has(key)) {
+          alert(`Phím "${key}" đã được sử dụng!`);
+          return;
+        }
+        state.assignKeyToOption(this, key);
+        keySpan.textContent = key;
+        this.keyboardKey = key;
+      } else {
+        alert('Chỉ chấp nhận 1 ký tự (a-z, 0-9)');
       }
     }
 
@@ -484,10 +580,9 @@
 
         // Cleanup old audio before setting new file
         MediaPlayer.cleanup(this.option);
-
+        
         this.option.file = file;
         await Database.save(this.option);
-        MediaPlayer.cleanup(this.option);
       };
 
       input.click();
@@ -496,6 +591,7 @@
     async handleDelete() {
       MediaPlayer.cleanup(this.option);
       await Database.delete(this.option.id);
+      state.removeOptionFromKeyboard(this);
       this.element.remove();
       this.menu.remove();
     }
@@ -603,6 +699,22 @@ minimizeBtn.onclick = () => {
       bar.appendChild(await ob.create());
     }
   }
+
+  // Keyboard event listener for shortcuts
+  document.addEventListener('keydown', (e) => {
+    // Don't trigger if user is typing in an input field
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) {
+      return;
+    }
+
+    const key = e.key.toLowerCase();
+    const optionButton = state.keyboardMap.get(key);
+    
+    if (optionButton && optionButton.element) {
+      e.preventDefault();
+      optionButton.handleClick();
+    }
+  });
 
   initBar();
 })();
