@@ -1,388 +1,595 @@
+/**
+ * YouTube Option Bar
+ * A persistent audio/video control bar for managing multiple media sources
+ */
+
 (async function () {
-    if (document.getElementById("myOptionBar")) return;
+  if (document.getElementById("myOptionBar")) return;
 
-    /* ========================== UTILS ============================= */
-    function createBtn(label, onClick) {
-        const btn = document.createElement("button");
-        btn.textContent = label;
-        btn.onclick = onClick;
-        return btn;
+  /* ========================== CONSTANTS ============================= */
+  const CONFIG = {
+    COLORS: {
+      DEFAULT: "#666",
+      DEFAULT_PLAY: "lime",
+      BACKGROUND_PALETTE: [
+        "#1a1a1a",
+        "#2d2d2d",
+        "#404040",
+        "#555555",
+        "#6b6b6b",
+        "#1e3a8a",
+        "#1e40af",
+        "#2563eb",
+        "#3b82f6",
+        "#60a5fa",
+        "#166534",
+        "#16a34a",
+        "#22c55e",
+        "#4ade80",
+        "#86efac",
+        "#991b1b",
+        "#dc2626",
+        "#ef4444",
+        "#f87171",
+        "#fca5a5",
+        "#78350f",
+        "#a16207",
+        "#ca8a04",
+        "#eab308",
+        "#facc15",
+        "#581c87",
+        "#7e22ce",
+        "#a855f7",
+        "#c084fc",
+        "#e9d5ff",
+        "#831843",
+        "#be123c",
+        "#e11d48",
+        "#f43f5e",
+        "#fb7185",
+      ],
+      PLAY_PALETTE: [
+        "#00ff00",
+        "#32cd32",
+        "#7fff00",
+        "#adff2f",
+        "#ffff00",
+        "#ffd700",
+        "#ffcc00",
+        "#ff9900",
+        "#ff0000",
+        "#ff4500",
+        "#ff6347",
+        "#ff7f50",
+        "#00ffff",
+        "#00ced1",
+        "#1e90ff",
+        "#4169e1",
+        "#ff00ff",
+        "#da70d6",
+        "#ee82ee",
+        "#dda0dd",
+      ],
+    },
+    DB: {
+      NAME: "YTOptionBarDB",
+      VERSION: 1,
+      STORE_NAME: "options",
+    },
+    DEFAULT_VOLUME: 1,
+    MENU_Z_INDEX: 99999999,
+  };
+
+  /* ========================== STATE ============================= */
+  class AppState {
+    constructor() {
+      this.audioMap = new Map();
+      this.playingTabs = new Set();
     }
 
-    const playingTabs = new Set();
-    const SELECTED_COLOR = "#1e7f1e"; // selected màu tối hơn
-
-    /* ====================== INDEXEDDB LOGIC ======================== */
-    function openDB() {
-        return new Promise((resolve, reject) => {
-            const req = indexedDB.open("YTOptionBarDB", 1);
-            req.onupgradeneeded = (e) => {
-                const db = e.target.result;
-                if (!db.objectStoreNames.contains("options")) {
-                    const store = db.createObjectStore("options", {
-                        keyPath: "id",
-                        autoIncrement: true
-                    });
-                    store.createIndex("name", "name", { unique: false });
-                }
-            };
-            req.onsuccess = (e) => resolve(e.target.result);
-            req.onerror = (e) => reject(e.target.error);
-        });
+    getAudio(id) {
+      return this.audioMap.get(id);
+    }
+    setAudio(id, audio) {
+      this.audioMap.set(id, audio);
+    }
+    deleteAudio(id) {
+      const audio = this.audioMap.get(id);
+      if (audio) {
+        audio.pause();
+        audio.src = "";
+        this.audioMap.delete(id);
+      }
     }
 
-    async function saveOption(opt) {
-        const db = await openDB();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction("options", "readwrite");
-            tx.objectStore("options").put(opt);
-            tx.oncomplete = resolve;
-            tx.onerror = (e) => reject(e.target.error);
-        });
+    isPlaying(btn) {
+      return this.playingTabs.has(btn);
     }
-
-    async function loadOptions() {
-        const db = await openDB();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction("options", "readonly");
-            const req = tx.objectStore("options").getAll();
-            req.onsuccess = () => resolve(req.result);
-            req.onerror = (e) => reject(e.target.error);
-        });
+    setPlaying(btn, playing) {
+      if (playing) this.playingTabs.add(btn);
+      else this.playingTabs.delete(btn);
     }
+  }
 
-    async function deleteOption(id) {
-        const db = await openDB();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction("options", "readwrite");
-            tx.objectStore("options").delete(id);
-            tx.oncomplete = resolve;
-            tx.onerror = (e) => reject(e.target.error);
-        });
-    }
+  const state = new AppState();
 
-    /* ======================= AUDIO/YT HANDLER ======================= */
-    const audioMap = {};
+  /* ========================== DATABASE ============================= */
+  class Database {
+    static async open() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(CONFIG.DB.NAME, CONFIG.DB.VERSION);
 
-    function parseYTID(url) {
-        const match = url.match(/[?&]v=([^&]+)/);
-        return match ? match[1] : url;
-    }
-
-    function applyColors(btn, opt) {
-        if (playingTabs.has(btn)) {
-            btn.style.background = opt.playColor || "lime";
-        } else if (btn.classList.contains("selected")) {
-            btn.style.background = SELECTED_COLOR;
-        } else {
-            btn.style.background = opt.color || "#555";
-        }
-    }
-
-    function playPause(opt, tabBtn) {
-        let isPlaying = false;
-
-        if (opt.type === "file") {
-            if (!opt.file) return alert("Chưa có file!");
-            if (!audioMap[opt.id]) {
-                audioMap[opt.id] = new Audio(URL.createObjectURL(opt.file));
-                audioMap[opt.id].loop = false;
-                audioMap[opt.id].volume = opt.volume ?? 1;
-                audioMap[opt.id].play();
-                isPlaying = true;
-            } else {
-                const audio = audioMap[opt.id];
-                if (audio.paused) {
-                    audio.play();
-                    isPlaying = true;
-                } else {
-                    audio.pause();
-                    isPlaying = false;
-                }
-            }
-        } else if (opt.type === "youtube") {
-            if (!opt.youtubePlayer) return alert("Player chưa tạo");
-            const state = opt.youtubePlayer.getPlayerState();
-            if (state === 1) {
-                opt.youtubePlayer.pauseVideo();
-                isPlaying = false;
-            } else {
-                opt.youtubePlayer.playVideo();
-                isPlaying = true;
-            }
-
-            if (opt.volume != null) opt.youtubePlayer.setVolume(opt.volume * 100);
-        }
-
-        // cập nhật trạng thái play
-        if (isPlaying) playingTabs.add(tabBtn);
-        else playingTabs.delete(tabBtn);
-
-        applyColors(tabBtn, opt);
-    }
-
-    /* ======================= CREATE OPTION ========================== */
-    async function createOptionElement(bar, opt, insertAfter = null) {
-        const btn = document.createElement("button");
-        btn.textContent = opt.name;
-        btn.style.background = opt.color || "#444";
-        btn.style.color = "#fff";
-        btn.style.border = "none";
-        btn.style.padding = "5px 8px";
-        btn.style.borderRadius = "4px";
-        btn.style.display = "flex";
-        btn.style.alignItems = "center";
-        btn.style.gap = "5px";
-        btn.style.position = "relative";
-        btn._optRef = opt;
-
-        // volume slider
-        const volInput = document.createElement("input");
-        volInput.type = "range";
-        volInput.min = 0;
-        volInput.max = 1;
-        volInput.step = 0.01;
-        volInput.value = opt.volume ?? 1;
-        volInput.style.width = "50px";
-        volInput.oninput = () => {
-            opt.volume = parseFloat(volInput.value);
-            if (audioMap[opt.id]) audioMap[opt.id].volume = opt.volume;
-            if (opt.youtubePlayer) opt.youtubePlayer.setVolume(opt.volume * 100);
-            saveOption(opt);
-        };
-        btn.appendChild(volInput);
-
-        // menu button
-        const menuBtn = document.createElement("span");
-        menuBtn.textContent = "⋮";
-        menuBtn.classList.add("menu-btn");
-        menuBtn.style.cursor = "pointer";
-        menuBtn.style.padding = "5px 8px";
-        menuBtn.style.userSelect = "none";
-        btn.appendChild(menuBtn);
-
-        // popup menu
-        const menu = document.createElement("div");
-        menu.classList.add("menu-popup");
-        menu.style.display = "none";
-        menu.style.position = "fixed";
-        menu.style.flexDirection = "column";
-        menu.style.background = "#333";
-        menu.style.border = "1px solid #555";
-        menu.style.padding = "5px";
-        menu.style.borderRadius = "4px";
-        menu.style.zIndex = 99999999;
-
-        function makeItem(label, handler) {
-            const item = document.createElement("div");
-            item.textContent = label;
-            item.style.cursor = "pointer";
-            item.style.padding = "4px 6px";
-            item.onmouseenter = () => (item.style.background = "#444");
-            item.onmouseleave = () => (item.style.background = "none");
-            item.onclick = handler;
-            return item;
-        }
-
-        menu.appendChild(makeItem("Sửa tên", (e) => {
-            e.stopPropagation();
-            const newName = prompt("Tên mới:", opt.name);
-            if (newName) {
-                opt.name = newName;
-                btn.childNodes[0].nodeValue = newName;
-                saveOption(opt);
-            }
-            menu.style.display = "none";
-        }));
-
-        menu.appendChild(makeItem("Đổi màu", (e) => {
-            e.stopPropagation();
-            const newColor = prompt("Màu nền:", opt.color || "#444");
-            if (newColor) {
-                opt.color = newColor;
-                applyColors(btn, opt);
-                saveOption(opt);
-            }
-            menu.style.display = "none";
-        }));
-
-        menu.appendChild(makeItem("Màu khi phát", (e) => {
-            e.stopPropagation();
-            const choice = prompt("Chọn màu (lime/yellow/orange/red/cyan/magenta):", opt.playColor || "lime");
-            const ok = ["lime", "yellow", "orange", "red", "cyan", "magenta"];
-            if (choice && ok.includes(choice)) {
-                opt.playColor = choice;
-                saveOption(opt);
-            }
-            menu.style.display = "none";
-        }));
-
-        menu.appendChild(makeItem("Upload file / YouTube", async (e) => {
-            e.stopPropagation();
-            const choice = confirm("OK = Upload file audio\nCancel = Nhập link YouTube");
-            if (choice) {
-                const input = document.createElement("input");
-                input.type = "file";
-                input.accept = "audio/*";
-                input.onchange = () => {
-                    opt.type = "file";
-                    opt.file = input.files[0];
-                    saveOption(opt);
-                };
-                input.click();
-            } else {
-                const url = prompt("Link YouTube:");
-                if (url) {
-                    opt.type = "youtube";
-                    opt.youtubeURL = url;
-                    const id = `yt-${opt.id}`;
-                    const div = document.createElement("div");
-                    div.style.display = "none";
-                    div.id = id;
-                    document.body.appendChild(div);
-
-                    function createPlayer() {
-                        opt.youtubePlayer = new YT.Player(id, { height: "0", width: "0", videoId: parseYTID(url) });
-                    }
-
-                    if (window.YT && YT.Player) createPlayer();
-                    else {
-                        const tag = document.createElement("script");
-                        tag.src = "https://www.youtube.com/iframe_api";
-                        window.onYouTubeIframeAPIReady = createPlayer;
-                        document.body.appendChild(tag);
-                    }
-                    saveOption(opt);
-                }
-            }
-            menu.style.display = "none";
-        }));
-
-        menu.appendChild(makeItem("Xóa", async (e) => {
-            e.stopPropagation();
-            if (confirm("Xóa option này?")) {
-                await deleteOption(opt.id);
-                btn.remove();
-            }
-            menu.style.display = "none";
-        }));
-
-        btn.appendChild(menu);
-
-        // toggle menu + clamp
-        menuBtn.onclick = (e) => {
-            e.stopPropagation();
-            if (menu.style.display === "flex") {
-                menu.style.display = "none";
-                return;
-            }
-            menu.style.display = "flex";
-            const r = menuBtn.getBoundingClientRect();
-            const mW = menu.offsetWidth;
-            const mH = menu.offsetHeight;
-            const vw = window.innerWidth;
-            const vh = window.innerHeight;
-
-            let left = r.right - mW;
-            let top = r.bottom + 4;
-
-            if (left < 6) left = 6;
-            if (left + mW > vw - 6) left = vw - mW - 6;
-            if (top + mH > vh) top = r.top - mH - 6;
-            if (top < 6) top = 6;
-
-            menu.style.left = left + "px";
-            menu.style.top = top + "px";
-        };
-
-        // chọn tab
-        btn.addEventListener("click", (e) => {
-            if (e.target.classList.contains("menu-btn")) return;
-
-            bar.querySelectorAll("button.selected").forEach(b => {
-                b.classList.remove("selected");
-                applyColors(b, b._optRef);
+        req.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains(CONFIG.DB.STORE_NAME)) {
+            const store = db.createObjectStore(CONFIG.DB.STORE_NAME, {
+              keyPath: "id",
+              autoIncrement: true,
             });
+            store.createIndex("name", "name");
+          }
+        };
 
-            btn.classList.add("selected");
-            applyColors(btn, opt);
-
-            playPause(opt, btn);
-        });
-
-        const addBtn = bar.querySelector("#addBtn");
-        if (insertAfter && insertAfter !== addBtn) bar.insertBefore(btn, insertAfter.nextSibling);
-        else bar.insertBefore(btn, addBtn);
-
-        return btn;
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
     }
 
-    /* ========================= CREATE BAR ============================ */
+    static async save(option) {
+      const db = await this.open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(CONFIG.DB.STORE_NAME, "readwrite");
+        const req = tx.objectStore(CONFIG.DB.STORE_NAME).put(option);
+        tx.oncomplete = () => resolve(req.result);
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+
+    static async loadAll() {
+      const db = await this.open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(CONFIG.DB.STORE_NAME, "readonly");
+        const req = tx.objectStore(CONFIG.DB.STORE_NAME).getAll();
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    static async delete(id) {
+      const db = await this.open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(CONFIG.DB.STORE_NAME, "readwrite");
+        tx.objectStore(CONFIG.DB.STORE_NAME).delete(id);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+  }
+
+  /* ========================== MEDIA ============================= */
+  class MediaPlayer {
+    static async play(option, button) {
+      if (option.type === "file") return this.playAudio(option, button);
+      alert("Chỉ hỗ trợ file MP3");
+      return false;
+    }
+
+    static playAudio(option, button) {
+      if (!option.file) {
+        alert("Không có file!");
+        return false;
+      }
+
+      let audio = state.getAudio(option.id);
+      if (!audio) {
+        audio = new Audio(URL.createObjectURL(option.file));
+        audio.loop = false;
+        audio.volume = option.volume ?? CONFIG.DEFAULT_VOLUME;
+        state.setAudio(option.id, audio);
+      }
+
+      const playing = !audio.paused;
+      if (playing) audio.pause();
+      else audio.play();
+
+      state.setPlaying(button, !playing);
+      return !playing;
+    }
+
+    static stop(option) {
+      const audio = state.getAudio(option.id);
+      if (audio) audio.pause();
+    }
+
+    static cleanup(option) {
+      if (option.type === "file") state.deleteAudio(option.id);
+    }
+  }
+
+  /* ========================== UI UTILS ============================= */
+  class UIUtils {
+    static applyButtonColors(button, option) {
+      button.style.background = state.isPlaying(button)
+        ? option.playColor || CONFIG.COLORS.DEFAULT_PLAY
+        : CONFIG.COLORS.DEFAULT;
+    }
+
+    static createMenuItem(label, handler) {
+      const el = document.createElement("div");
+      el.textContent = label;
+      el.style.cssText = `
+        padding: 4px 8px; cursor: pointer; color:#fff;
+      `;
+      el.onmouseenter = () => (el.style.background = "#444");
+      el.onmouseleave = () => (el.style.background = "transparent");
+      el.onclick = (e) => {
+        e.stopPropagation();
+        handler();
+        el.closest(".menu-popup").style.display = "none";
+      };
+      return el;
+    }
+
+    static positionMenu(menu, trigger) {
+      const r = trigger.getBoundingClientRect();
+      let left = r.right - menu.offsetWidth;
+      let top = r.bottom + 4;
+
+      if (left < 6) left = 6;
+      if (top + menu.offsetHeight > innerHeight - 6)
+        top = r.top - menu.offsetHeight - 6;
+
+      menu.style.left = left + "px";
+      menu.style.top = top + "px";
+    }
+  }
+
+  /* ========================== OPTION BUTTON ============================= */
+  class OptionButton {
+    constructor(bar, option) {
+      this.bar = bar;
+      this.option = option;
+      this.element = null;
+      this.menu = null;
+    }
+
+    async create() {
+      const btn = document.createElement("button");
+      btn.style.cssText = `
+        background:${this.option.color || CONFIG.COLORS.DEFAULT};
+        color:#fff; border:none; padding:5px 8px; border-radius:4px;
+        display:flex; align-items:center; gap:5px; position:relative;
+      `;
+      btn._optRef = this.option;
+
+      const nameSpan = document.createElement("span");
+      nameSpan.textContent = this.option.name;
+      btn.appendChild(nameSpan);
+
+      const vol = this.createVolumeSlider();
+      btn.appendChild(vol);
+
+      const menuBtn = this.createMenuButton();
+      btn.appendChild(menuBtn);
+
+      this.menu = await this.createMenu(nameSpan);
+
+      btn.onclick = (e) => {
+        if (e.target.classList.contains("menu-btn")) return;
+        this.handleClick();
+      };
+
+      this.element = btn;
+      return btn;
+    }
+
+    createVolumeSlider() {
+      const s = document.createElement("input");
+      s.type = "range";
+      s.min = 0;
+      s.max = 1;
+      s.step = 0.01;
+      s.value = this.option.volume ?? CONFIG.DEFAULT_VOLUME;
+      s.style.width = "50px";
+
+      s.oninput = () => {
+        this.option.volume = parseFloat(s.value);
+        const audio = state.getAudio(this.option.id);
+        if (audio) audio.volume = this.option.volume;
+        Database.save(this.option);
+      };
+
+      return s;
+    }
+
+    createMenuButton() {
+      const b = document.createElement("span");
+      b.textContent = "⋮";
+      b.classList.add("menu-btn");
+      b.style.cssText = `
+        cursor:pointer; padding:5px; user-select:none;
+      `;
+      b.onclick = (e) => {
+        e.stopPropagation();
+        this.toggleMenu();
+      };
+      return b;
+    }
+
+    async createMenu(nameSpan) {
+      const m = document.createElement("div");
+      m.classList.add("menu-popup");
+      m.style.cssText = `
+        display:none; position:fixed; background:#333;
+        border:1px solid #555; padding:5px; border-radius:4px;
+        z-index:${CONFIG.MENU_Z_INDEX};
+      `;
+      document.body.appendChild(m);
+
+      m.appendChild(
+        UIUtils.createMenuItem("Sửa tên", () => this.handleRename(nameSpan))
+      );
+      m.appendChild(
+        UIUtils.createMenuItem("Đổi màu nền", () => this.handleChangeColor())
+      );
+      m.appendChild(
+        UIUtils.createMenuItem("Màu khi phát", () =>
+          this.handleChangePlayColor()
+        )
+      );
+      m.appendChild(
+        UIUtils.createMenuItem("Upload file MP3", () =>
+          this.handleChangeMedia()
+        )
+      );
+      m.appendChild(UIUtils.createMenuItem("Xóa", () => this.handleDelete()));
+
+      return m;
+    }
+
+    toggleMenu() {
+      const open = this.menu.style.display === "flex";
+      document
+        .querySelectorAll(".menu-popup")
+        .forEach((m) => (m.style.display = "none"));
+      if (!open) {
+        this.menu.style.display = "flex";
+        UIUtils.positionMenu(
+          this.menu,
+          this.element.querySelector(".menu-btn")
+        );
+      }
+    }
+
+    handleClick() {
+      this.bar.querySelectorAll("button.selected").forEach((btn) => {
+        btn.classList.remove("selected");
+        UIUtils.applyButtonColors(btn, btn._optRef);
+      });
+
+      this.element.classList.add("selected");
+      MediaPlayer.play(this.option, this.element);
+      UIUtils.applyButtonColors(this.element, this.option);
+    }
+
+    async handleRename(nameSpan) {
+      const newName = prompt("Tên mới:", this.option.name);
+      if (newName?.trim()) {
+        this.option.name = newName.trim();
+        nameSpan.textContent = this.option.name;
+        await Database.save(this.option);
+      }
+    }
+
+    async handleChangeColor() {
+      this.showColorPicker(
+        "Chọn màu nền",
+        CONFIG.COLORS.BACKGROUND_PALETTE,
+        async (color) => {
+          this.option.color = color;
+          this.element.style.background = color;
+          await Database.save(this.option);
+        }
+      );
+    }
+
+    async handleChangePlayColor() {
+      this.showColorPicker(
+        "Màu khi phát",
+        CONFIG.COLORS.PLAY_PALETTE,
+        async (color) => {
+          this.option.playColor = color;
+          await Database.save(this.option);
+        }
+      );
+    }
+
+    showColorPicker(title, palette, onSelect) {
+      const overlay = document.createElement("div");
+      overlay.style.cssText = `
+        position:fixed; inset:0; background:rgba(0,0,0,0.7);
+        z-index:${CONFIG.MENU_Z_INDEX}; display:flex;
+        align-items:center; justify-content:center;
+      `;
+      overlay.onclick = () => overlay.remove();
+
+      const picker = document.createElement("div");
+      picker.style.cssText = `
+        background:#2a2a2a; border:2px solid #444;
+        border-radius:12px; padding:20px;
+      `;
+      picker.onclick = (e) => e.stopPropagation();
+
+      const titleEl = document.createElement("div");
+      titleEl.textContent = title;
+      titleEl.style.cssText = `
+        color:#fff; font-size:16px; font-weight:bold; margin-bottom:16px;
+      `;
+      picker.appendChild(titleEl);
+
+      const grid = document.createElement("div");
+      grid.style.cssText = `
+        display:grid; grid-template-columns:repeat(5,1fr);
+        gap:8px; margin-bottom:16px;
+      `;
+
+      palette.forEach((color) => {
+        const s = document.createElement("button");
+        s.style.cssText = `
+          width:40px; height:40px; background:${color};
+          border:2px solid #444; border-radius:6px; cursor:pointer;
+        `;
+        s.onclick = () => {
+          onSelect(color);
+          overlay.remove();
+        };
+        grid.appendChild(s);
+      });
+
+      picker.appendChild(grid);
+
+      const custom = document.createElement("input");
+      custom.type = "color";
+      custom.style.cssText = `
+        width:60px; height:35px; cursor:pointer;
+      `;
+      custom.onchange = () => {
+        onSelect(custom.value);
+        overlay.remove();
+      };
+
+      picker.appendChild(custom);
+      overlay.appendChild(picker);
+      document.body.appendChild(overlay);
+    }
+
+    async handleChangeMedia() {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".mp3";
+
+      input.onchange = async () => {
+        const file = input.files[0];
+        if (!file) return;
+
+        this.option.file = file;
+        await Database.save(this.option);
+        MediaPlayer.cleanup(this.option);
+      };
+
+      input.click();
+    }
+
+    async handleDelete() {
+      MediaPlayer.cleanup(this.option);
+      await Database.delete(this.option.id);
+      this.element.remove();
+      this.menu.remove();
+    }
+  }
+
+  /* ========================== MAIN BAR ============================= */
+  async function initBar() {
     const bar = document.createElement("div");
     bar.id = "myOptionBar";
-    bar.style.position = "fixed";
-    bar.style.bottom = "0";
-    bar.style.left = "0";
-    bar.style.width = "100%";
-    bar.style.background = "#222";
-    bar.style.color = "#fff";
-    bar.style.padding = "8px";
-    bar.style.zIndex = 9999;
-    bar.style.display = "flex";
-    bar.style.flexWrap = "wrap";
-    bar.style.gap = "8px";
-    bar.style.fontFamily = "Arial,sans-serif";
-    bar.style.boxShadow = "0 -2px 6px rgba(0,0,0,0.3)";
+    bar.style.cssText = `
+      position:fixed; bottom:0; left:0; right:0; height:50px;
+      background: rgba(255,255,255,0.15);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.35);
+      padding:6px; display:flex; gap:8px;
+      align-items:center; z-index:9999999; overflow-x:auto;
+    `;
+
     document.body.appendChild(bar);
-    document.body.style.paddingBottom = "80px";
 
-    // minimize button floating
-    const minBtn = document.createElement("div");
-    minBtn.textContent = "🗕";
-    minBtn.style.position = "fixed";
-    minBtn.style.right = "12px";
-    minBtn.style.bottom = "70px";
-    minBtn.style.background = "#222";
-    minBtn.style.padding = "6px 12px";
-    minBtn.style.borderRadius = "6px";
-    minBtn.style.cursor = "pointer";
-    minBtn.style.zIndex = 100000;
-    minBtn.style.boxShadow = "0 0 6px rgba(0,0,0,0.4)";
-    document.body.appendChild(minBtn);
+    // PAUSE ALL BUTTON
+    const pauseAllBtn = document.createElement("button");
+    pauseAllBtn.textContent = "⏸";
+    pauseAllBtn.style.cssText = `
+  font-size:20px; padding:0 12px; height:100%;
+  cursor:pointer; background:#444; color:white; border:none;
+  border-radius:4px;
+`;
+    pauseAllBtn.onclick = () => {
+      // Pause all playing audio
+      for (const audio of state.audioMap.values()) {
+        audio.pause();
+      }
 
-    minBtn.onclick = () => {
-        const collapsed = bar.getAttribute("data-minimized") === "1";
-        if (collapsed) {
-            bar.style.height = "auto";
-            bar.style.overflow = "visible";
-            bar.removeAttribute("data-minimized");
-        } else {
-            bar.style.height = "32px";
-            bar.style.overflow = "hidden";
-            bar.setAttribute("data-minimized", "1");
-        }
+      // Reset tất cả nút đang sáng
+      state.playingTabs.forEach((btn) => {
+        state.setPlaying(btn, false);
+        UIUtils.applyButtonColors(btn, btn._optRef);
+      });
+
+      state.playingTabs.clear();
     };
 
-    // add button
-    const addBtn = createBtn("+", async () => {
-        const selectedBtn = bar.querySelector("button.selected") || null;
-        const newOpt = { name: "New Option", type: "file", file: null, volume: 1, color: "#444", playColor: "lime" };
-        await saveOption(newOpt);
-        const newBtn = await createOptionElement(bar, newOpt, selectedBtn);
+    bar.appendChild(pauseAllBtn);
+// MINIMIZE BUTTON (absolute floating)
+const minimizeBtn = document.createElement("button");
+minimizeBtn.textContent = "—";
+minimizeBtn.style.cssText = `
+  position: fixed;
+  bottom: 52px;          /* nằm ngay trên soundbar */
+  right: 20px;
+  z-index: 999999999;
+  font-size: 18px;
+  padding: 6px 12px;
+  background: #444;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+`;
+document.body.appendChild(minimizeBtn);
 
-        bar.querySelectorAll("button.selected").forEach((b) => b.classList.remove("selected"));
-        newBtn.classList.add("selected");
-        applyColors(newBtn, newOpt);
-    });
-    addBtn.id = "addBtn";
+let minimized = false;
+
+minimizeBtn.onclick = () => {
+  minimized = !minimized;
+
+  if (minimized) {
+    // Thu soundbar xuống ngoài màn hình
+    bar.style.transform = "translateY(60px)";
+    minimizeBtn.textContent = "▢";
+    minimizeBtn.style.bottom = "10px";   // chuyển gần mép dưới
+  } else {
+    bar.style.transform = "translateY(0)";
+    minimizeBtn.textContent = "—";
+    minimizeBtn.style.bottom = "52px";   // trở về vị trí cũ
+  }
+};
+
+    const addBtn = document.createElement("button");
+    addBtn.textContent = "+";
+    addBtn.style.cssText = `
+      font-size:20px; padding:0 10px; height:100%; cursor:pointer;
+    `;
+    addBtn.onclick = async () => {
+      const option = {
+        id: Date.now(),
+        name: "New",
+        type: "file",
+        volume: 1,
+        color: CONFIG.COLORS.DEFAULT,
+      };
+      await Database.save(option);
+
+      const ob = new OptionButton(bar, option);
+      bar.appendChild(await ob.create());
+    };
+
     bar.appendChild(addBtn);
 
-    // load options
-    const options = await loadOptions();
-    for (let opt of options) createOptionElement(bar, opt);
+    const saved = await Database.loadAll();
+    for (const option of saved) {
+      const ob = new OptionButton(bar, option);
+      bar.appendChild(await ob.create());
+    }
+  }
 
-    // click ra ngoài để đóng menu
-    document.addEventListener("click", () => {
-        document.querySelectorAll(".menu-popup").forEach(m => m.style.display = "none");
-    });
+  initBar();
 })();
