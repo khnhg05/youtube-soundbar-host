@@ -229,6 +229,49 @@
       return false;
     }
 
+    static updateProgressUI(button, audio) {
+       if (!button || !audio) return;
+       const bar = button.querySelector('.progress-fill');
+       const point = button.querySelector('.progress-point');
+       const timeText = button.querySelector('.time-display');
+       
+       if (audio.duration) {
+           const percent = (audio.currentTime / audio.duration) * 100;
+           if (bar) bar.style.width = `${percent}%`;
+           if (point) point.style.left = `${percent}%`;
+           if (timeText) {
+               const format = (s) => {
+                   const m = Math.floor(s / 60);
+                   const sec = Math.floor(s % 60);
+                   return `${m}:${sec.toString().padStart(2, '0')}`;
+               };
+               timeText.textContent = `${format(audio.currentTime)} / ${format(audio.duration)}`;
+           }
+       }
+    }
+
+    static preload(option, button) {
+       if (!option.file) return;
+       
+       let audio = state.getAudio(option.id);
+       if (!audio) {
+         audio = new Audio(URL.createObjectURL(option.file));
+         audio.preload = 'metadata'; // Hint to load metadata
+         state.setAudio(option.id, audio);
+       }
+       
+       // Update UI whenever time changes (seeking, playing, etc)
+       const update = () => this.updateProgressUI(button, audio);
+       audio.ontimeupdate = update;
+       
+       // Initial show
+       if (audio.readyState >= 1) { 
+           update();
+       } else {
+           audio.addEventListener('loadedmetadata', update, { once: true });
+       }
+    }
+
     static playAudio(option, button) {
       if (!option.file) {
         alert("Không có file!");
@@ -237,25 +280,65 @@
 
       let audio = state.getAudio(option.id);
       if (!audio) {
-        audio = new Audio(URL.createObjectURL(option.file));
-        audio.loop = false;
-        audio.volume = option.volume ?? CONFIG.DEFAULT_VOLUME;
-        state.setAudio(option.id, audio);
+        // Should be created by preload, but just in case
+        this.preload(option, button);
+        audio = state.getAudio(option.id);
+        if (!audio) return false;
       }
 
       // Ensure volume is always up to date
       audio.volume = option.volume ?? CONFIG.DEFAULT_VOLUME;
+      
+      // Animation loop for smooth UI updates (60fps)
+      const animate = () => {
+         if (audio.paused) return; 
+         this.updateProgressUI(button, audio);
+         requestAnimationFrame(animate);
+      };
 
       const playing = !audio.paused;
       if (playing) {
         audio.pause();
       } else {
-        // Resume from current position, don't restart
-        audio.play().catch(err => {
+        // Restart logic
+        // If user manually sought, play from there. Otherwise restart.
+        if (!audio._manualSeek) {
+             audio.currentTime = 0;
+        }
+        audio._manualSeek = false; // Reset flag after use
+        
+        audio.play().then(() => {
+            requestAnimationFrame(animate); 
+        }).catch(err => {
           console.error("Failed to play audio:", err);
           alert("Không thể phát file audio!");
         });
       }
+      
+      // Reset progress on end
+      audio.onended = () => {
+         if (button) {
+            const bar = button.querySelector('.progress-fill');
+            const point = button.querySelector('.progress-point');
+            const timeText = button.querySelector('.time-display');
+            
+            if (bar) bar.style.width = '0%';
+            if (point) point.style.left = '0%';
+            if (timeText && audio.duration) {
+                 // Reset to 0:00 / total
+                 const format = (s) => {
+                     const m = Math.floor(s / 60);
+                     const sec = Math.floor(s % 60);
+                     return `${m}:${sec.toString().padStart(2, '0')}`;
+                 };
+                timeText.textContent = `0:00 / ${format(audio.duration)}`;
+            }
+            
+            // Update UI state to paused
+            state.setPlaying(button, false);
+            UIUtils.applyButtonColors(button, option);
+         }
+      };
 
       state.setPlaying(button, !playing);
       return !playing;
@@ -326,8 +409,8 @@
       const btn = document.createElement("button");
       btn.style.cssText = `
         background:${this.option.color || CONFIG.COLORS.DEFAULT};
-        color:#fff; border:none; padding:5px 8px; border-radius:4px;
-        display:flex; align-items:center; gap:5px; position:relative;
+        color:#fff; border:none; padding:5px 8px; padding-bottom: 9px; border-radius:4px;
+        display:flex; align-items:center; gap:5px; position:relative; overflow: hidden;
       `;
       btn._optRef = this.option;
 
@@ -349,14 +432,79 @@
       const menuBtn = this.createMenuButton();
       btn.appendChild(menuBtn);
 
+      // Create Progress Bar
+      const progressContainer = document.createElement("div");
+      progressContainer.style.cssText = `
+        position: absolute; bottom: 0; left: 0; right: 0; height: 12px;
+        background: transparent; z-index: 10; cursor: pointer;
+      `;
+      // background for visual bar
+      const barBg = document.createElement("div");
+      barBg.style.cssText = `
+         position: absolute; bottom: 0; left: 0; right: 0; height: 4px;
+         background: rgba(0,0,0,0.3); pointer-events: none;
+      `;
+      progressContainer.appendChild(barBg);
+      
+      const progressFill = document.createElement("div");
+      progressFill.classList.add('progress-fill');
+      progressFill.style.cssText = `
+        position: absolute; bottom: 0; left: 0;
+        width: 0%; height: 4px; background: rgba(255,255,255,0.7);
+        pointer-events: none;
+      `;
+      progressContainer.appendChild(progressFill);
+      
+      const progressPoint = document.createElement("div");
+      progressPoint.classList.add('progress-point');
+      progressPoint.style.cssText = `
+        position: absolute; bottom: -2px; left: 0%; transform: translateX(-50%);
+        width: 8px; height: 8px; background: #444; border: 1px solid #fff; border-radius: 50%;
+        box-shadow: 0 0 2px rgba(0,0,0,0.5); pointer-events: none;
+      `;
+      progressContainer.appendChild(progressPoint);
+      
+      btn.appendChild(progressContainer);
+      
+      // Seek functionality
+      progressContainer.onclick = (e) => {
+         e.stopPropagation();
+         const rect = progressContainer.getBoundingClientRect();
+         const x = e.clientX - rect.left;
+         const percent = Math.max(0, Math.min(1, x / rect.width));
+         
+         const audio = state.getAudio(this.option.id);
+         if (audio && audio.duration) {
+             audio.currentTime = percent * audio.duration;
+             audio._manualSeek = true; // Flag to tell playAudio to resume
+         }
+      };
+
+      // Time Display
+      const timeDisplay = document.createElement("div");
+      timeDisplay.classList.add('time-display');
+      timeDisplay.textContent = "0:00 / 0:00";
+      timeDisplay.style.cssText = `
+        position: absolute; bottom: 8px; right: 4px;
+        font-size: 9px; color: rgba(255,255,255,0.9);
+        pointer-events: none;
+        background: rgba(0,0,0,0.4);
+        padding: 1px 3px; border-radius: 3px;
+      `;
+      btn.appendChild(timeDisplay);
+      
+      this.element = btn;
+
       this.menu = await this.createMenu(nameSpan, keySpan);
 
       btn.onclick = (e) => {
         if (e.target.classList.contains("menu-btn")) return;
         this.handleClick();
       };
-
-      this.element = btn;
+      
+      // Preload metadata to show duration
+      MediaPlayer.preload(this.option, btn);
+      
       return btn;
     }
 
@@ -583,6 +731,9 @@
         
         this.option.file = file;
         await Database.save(this.option);
+        
+        // Preload new file
+        MediaPlayer.preload(this.option, this.element);
       };
 
       input.click();
@@ -607,16 +758,87 @@
       backdrop-filter: blur(10px);
       border: 1px solid rgba(255, 255, 255, 0.35);
       padding:6px; display:flex; gap:8px;
-      align-items:center; z-index:9999999; overflow-x:auto;
+      align-items:center; z-index:9999999; 
+      flex-wrap: wrap; align-content: flex-start; overflow-y: auto;
+      transition: height 0.1s;
     `;
 
     document.body.appendChild(bar);
+    
+    // RESIZE HANDLE
+    const handle = document.createElement("div");
+    handle.style.cssText = `
+        position: absolute; top: 0; left: 0; right: 0; height: 5px;
+        cursor: ns-resize; z-index: 10000000;
+    `;
+    // Add a visual hint
+    const handleLine = document.createElement("div");
+    handleLine.style.cssText = `
+         width: 100px; height: 3px; background: rgba(255,255,255,0.3);
+         border-radius: 2px; margin: 1px auto;
+    `;
+    handle.appendChild(handleLine);
+    handle.onmouseenter = () => handleLine.style.background = "rgba(255,255,255,0.6)";
+    handle.onmouseleave = () => handleLine.style.background = "rgba(255,255,255,0.3)";
+    
+    bar.appendChild(handle);
+    
+    // Drag Logic
+    let isDragging = false;
+    let startY = 0;
+    let startHeight = 0;
+    
+    handle.onmousedown = (e) => {
+        isDragging = true;
+        startY = e.clientY;
+        startHeight = bar.offsetHeight;
+        document.body.style.cursor = 'ns-resize';
+        e.preventDefault();
+    };
+    
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const delta = startY - e.clientY; // Drag up increases height
+        let newHeight = startHeight + delta;
+        
+        // Approximate row height ~ 54px (50px min + gaps)
+        const rowHeight = 54;
+        const minHeight = 50;
+        const maxHeight = window.innerHeight; // Max limit
+        
+        // Snap logic
+        if (newHeight < minHeight) newHeight = minHeight;
+        if (newHeight > maxHeight) newHeight = maxHeight;
+        
+        // Calculate target rows
+        const rows = Math.round(newHeight / rowHeight);
+        let snappedHeight = Math.max(minHeight, rows * rowHeight + (rows > 1 ? 6 : 0)); // Adjust for padding
+        
+        if (snappedHeight > maxHeight) snappedHeight = maxHeight;
+        
+        bar.style.height = `${snappedHeight}px`;
+        
+        // Update minimize button position if visible
+        if (!minimized) {
+             minimizeBtn.style.bottom = `${snappedHeight + 2}px`;
+        }
+    });
+    
+    const stopDrag = () => {
+        if (isDragging) {
+            isDragging = false;
+            document.body.style.cursor = '';
+        }
+    };
+    document.addEventListener('mouseup', stopDrag);
+
+    // PAUSE ALL BUTTON
 
     // PAUSE ALL BUTTON
     const pauseAllBtn = document.createElement("button");
     pauseAllBtn.textContent = "⏸";
     pauseAllBtn.style.cssText = `
-  font-size:20px; padding:0 12px; height:100%;
+  font-size:20px; padding:0 12px; height:36px;
   cursor:pointer; background:#444; color:white; border:none;
   border-radius:4px;
 `;
@@ -662,33 +884,48 @@ minimizeBtn.onclick = () => {
 
   if (minimized) {
     // Thu soundbar xuống ngoài màn hình
-    bar.style.transform = "translateY(60px)";
+    bar.style.transform = "translateY(100%)";
     minimizeBtn.textContent = "▢";
     minimizeBtn.style.bottom = "10px";   // chuyển gần mép dưới
   } else {
     bar.style.transform = "translateY(0)";
     minimizeBtn.textContent = "—";
-    minimizeBtn.style.bottom = "52px";   // trở về vị trí cũ
+    // Place button just above the bar
+    minimizeBtn.style.bottom = `${bar.offsetHeight + 2}px`;
   }
 };
 
     const addBtn = document.createElement("button");
     addBtn.textContent = "+";
     addBtn.style.cssText = `
-      font-size:20px; padding:0 10px; height:100%; cursor:pointer;
+      font-size:20px; padding:0 10px; height:36px; cursor:pointer;
+      background: #444; color: #fff; border: none; border-radius: 4px;
     `;
     addBtn.onclick = async () => {
-      const option = {
-        id: Date.now(),
-        name: "New",
-        type: "file",
-        volume: 1,
-        color: CONFIG.COLORS.DEFAULT,
-      };
-      await Database.save(option);
-
-      const ob = new OptionButton(bar, option);
-      bar.appendChild(await ob.create());
+      try {
+        const option = {
+          id: Date.now(),
+          name: "New",
+          type: "file",
+          volume: 1,
+          color: CONFIG.COLORS.DEFAULT,
+        };
+        await Database.save(option);
+  
+        const ob = new OptionButton(bar, option);
+        bar.appendChild(await ob.create());
+        
+        // Auto-scroll/resize if overflow
+        if (bar.scrollHeight > bar.offsetHeight) {
+             const rowHeight = 54;
+             let newHeight = Math.ceil(bar.scrollHeight / rowHeight) * rowHeight + 6;
+             if (newHeight > window.innerHeight) newHeight = window.innerHeight;
+             bar.style.height = `${newHeight}px`;
+        }
+      } catch (err) {
+        console.error("Add failed:", err);
+        alert("Lỗi khi thêm mới: " + err.message);
+      }
     };
 
     bar.appendChild(addBtn);

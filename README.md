@@ -1,6 +1,4 @@
 hot fix
-1. volume
-2. position + color when adding  
-3. minimize version
-4. option menu bar
-5. signal when opening
+1. track 1 đang play, play track 2 --> track 1 must be reset to zero
+2. add reset global for all
+3. add volumn, play, pause button each track
