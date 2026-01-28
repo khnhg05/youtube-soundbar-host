@@ -17,10 +17,10 @@
         "https://www.youtube.com/*"
       ],
       "js": [
-        "content.js"
+        "assets/js/content.js"
       ],
       "css": [
-        "style.css"
+        "assets/css/style.css"
       ]
     }
   ]
