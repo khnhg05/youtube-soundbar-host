@@ -79,6 +79,12 @@
       VERSION: 1,
       STORE_NAME: "options",
     },
+    SYNC: {
+      CHANNEL_NAME: "mla-soundbar-sync",
+      STORAGE_KEY: "mla_soundbar_playback_state",
+      OPTIONS_REVISION_KEY: "mla_soundbar_options_revision",
+      MAX_DRIFT_SEC: 0.35,
+    },
     DEFAULT_VOLUME: 1,
     MENU_Z_INDEX: 99999999,
   };
@@ -90,6 +96,7 @@
       this.playingTabs = new Set();
       this.keyboardMap = new Map(); // key -> option button
       this.optionButtons = []; // track order for auto-assignment
+      this.optionButtonMap = new Map(); // option id -> option button
     }
 
     getAudio(id) {
@@ -140,6 +147,52 @@
       return null;
     }
 
+    sortOptionButtons() {
+      this.optionButtons.sort((a, b) => {
+        const orderA = a?.option?.order ?? a?.option?.id ?? 0;
+        const orderB = b?.option?.order ?? b?.option?.id ?? 0;
+        return orderA - orderB;
+      });
+    }
+
+    rebuildKeyboardAssignments() {
+      this.sortOptionButtons();
+      this.keyboardMap.clear();
+
+      const assignedButtons = new Set();
+
+      for (const optionButton of this.optionButtons) {
+        const customKey = optionButton.option?.shortcutKey?.toLowerCase?.() || null;
+        if (!customKey || this.keyboardMap.has(customKey)) continue;
+
+        this.keyboardMap.set(customKey, optionButton);
+        assignedButtons.add(optionButton);
+        optionButton.keyboardKey = customKey;
+        if (optionButton.keySpan) optionButton.keySpan.textContent = customKey;
+      }
+
+      let defaultKeyIndex = 0;
+      for (const optionButton of this.optionButtons) {
+        if (assignedButtons.has(optionButton)) continue;
+
+        while (
+          defaultKeyIndex < CONFIG.KEYBOARD.DEFAULT_KEYS.length &&
+          this.keyboardMap.has(CONFIG.KEYBOARD.DEFAULT_KEYS[defaultKeyIndex])
+        ) {
+          defaultKeyIndex += 1;
+        }
+
+        const nextKey = CONFIG.KEYBOARD.DEFAULT_KEYS[defaultKeyIndex] || '';
+        if (nextKey) {
+          this.keyboardMap.set(nextKey, optionButton);
+          defaultKeyIndex += 1;
+        }
+
+        optionButton.keyboardKey = nextKey;
+        if (optionButton.keySpan) optionButton.keySpan.textContent = nextKey;
+      }
+    }
+
     removeOptionFromKeyboard(optionButton) {
       for (const [key, btn] of this.keyboardMap) {
         if (btn === optionButton) {
@@ -158,6 +211,18 @@
       return this.assignKeyToOption(optionButton);
     }
 
+    setOptionButton(optionId, optionButton) {
+      this.optionButtonMap.set(optionId, optionButton);
+    }
+
+    getOptionButton(optionId) {
+      return this.optionButtonMap.get(optionId);
+    }
+
+    deleteOptionButton(optionId) {
+      this.optionButtonMap.delete(optionId);
+    }
+
     getKeyForOption(optionButton) {
       for (const [key, btn] of this.keyboardMap) {
         if (btn === optionButton) return key;
@@ -170,6 +235,23 @@
 
   /* ========================== DATABASE ============================= */
   class Database {
+    static normalizeOption(option) {
+      if (!option) return option;
+      return {
+        ...option,
+        order: option.order ?? option.id ?? Date.now(),
+      };
+    }
+
+    static sortOptions(options) {
+      return [...options].sort((a, b) => {
+        const orderA = a.order ?? a.id ?? 0;
+        const orderB = b.order ?? b.id ?? 0;
+        if (orderA !== orderB) return orderA - orderB;
+        return (a.id ?? 0) - (b.id ?? 0);
+      });
+    }
+
     static async open() {
       return new Promise((resolve, reject) => {
         const req = indexedDB.open(CONFIG.DB.NAME, CONFIG.DB.VERSION);
@@ -191,10 +273,11 @@
     }
 
     static async save(option) {
+      const normalizedOption = this.normalizeOption(option);
       const db = await this.open();
       return new Promise((resolve, reject) => {
         const tx = db.transaction(CONFIG.DB.STORE_NAME, "readwrite");
-        const req = tx.objectStore(CONFIG.DB.STORE_NAME).put(option);
+        const req = tx.objectStore(CONFIG.DB.STORE_NAME).put(normalizedOption);
         tx.oncomplete = () => resolve(req.result);
         tx.onerror = () => reject(tx.error);
       });
@@ -205,7 +288,10 @@
       return new Promise((resolve, reject) => {
         const tx = db.transaction(CONFIG.DB.STORE_NAME, "readonly");
         const req = tx.objectStore(CONFIG.DB.STORE_NAME).getAll();
-        req.onsuccess = () => resolve(req.result);
+        req.onsuccess = () => {
+          const normalized = req.result.map((option) => this.normalizeOption(option));
+          resolve(this.sortOptions(normalized));
+        };
         req.onerror = () => reject(req.error);
       });
     }
@@ -221,8 +307,223 @@
     }
   }
 
+  /* ========================== TAB SYNC ============================= */
+  class SyncManager {
+    static tabId = `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    static channel = null;
+    static initialized = false;
+    static lastRevisionByOption = new Map();
+    static lastOptionsRevision = 0;
+    static bar = null;
+
+    static init(bar) {
+      if (this.initialized) return;
+      this.initialized = true;
+      this.bar = bar;
+
+      if (typeof BroadcastChannel !== "undefined") {
+        this.channel = new BroadcastChannel(CONFIG.SYNC.CHANNEL_NAME);
+        this.channel.onmessage = (event) => {
+          this.handleIncomingMessage(event.data).catch((err) => {
+            console.error("Sync apply failed:", err);
+          });
+        };
+      }
+
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName !== "local") return;
+        const revisionChange = changes[CONFIG.SYNC.OPTIONS_REVISION_KEY];
+        if (!revisionChange?.newValue) return;
+        this.handleOptionsRevision(revisionChange.newValue).catch((err) => {
+          console.error("Options reconcile failed:", err);
+        });
+      });
+    }
+
+    static createRevision() {
+      return Date.now() * 1000 + Math.floor(Math.random() * 1000);
+    }
+
+    static async readSharedState() {
+      return new Promise((resolve) => {
+        chrome.storage.local.get([CONFIG.SYNC.STORAGE_KEY], (result) => {
+          resolve(result[CONFIG.SYNC.STORAGE_KEY] || {});
+        });
+      });
+    }
+
+    static async writeSharedState(sharedState) {
+      return new Promise((resolve) => {
+        chrome.storage.local.set({ [CONFIG.SYNC.STORAGE_KEY]: sharedState }, resolve);
+      });
+    }
+
+    static createPlaybackState(option, audio, overrides = {}) {
+      return {
+        optionId: option.id,
+        isPlaying: overrides.isPlaying ?? Boolean(audio && !audio.paused),
+        currentTime: overrides.currentTime ?? audio?.currentTime ?? 0,
+        updatedAt: overrides.updatedAt ?? Date.now(),
+        originTabId: this.tabId,
+        revision: overrides.revision ?? this.createRevision(),
+      };
+    }
+
+    static async publishPlaybackState(option, audio, overrides = {}) {
+      const playbackState = this.createPlaybackState(option, audio, overrides);
+      const sharedState = await this.readSharedState();
+      sharedState[option.id] = playbackState;
+      await this.writeSharedState(sharedState);
+      this.lastRevisionByOption.set(option.id, playbackState.revision);
+      this.channel?.postMessage({ type: "playback-state", payload: playbackState });
+      return playbackState;
+    }
+
+    static async restorePlaybackState(option, button) {
+      const sharedState = await this.readSharedState();
+      const playbackState = sharedState[option.id];
+      if (!playbackState) return;
+      await this.handleIncomingState(playbackState, { allowSameTab: true, buttonOverride: button });
+    }
+
+    static async handleIncomingState(playbackState, options = {}) {
+      const { allowSameTab = false, buttonOverride = null } = options;
+      if (!playbackState || (playbackState.originTabId === this.tabId && !allowSameTab)) {
+        return;
+      }
+
+      const lastRevision = this.lastRevisionByOption.get(playbackState.optionId) || 0;
+      if (playbackState.revision <= lastRevision) return;
+      this.lastRevisionByOption.set(playbackState.optionId, playbackState.revision);
+
+      const optionButton = buttonOverride ? { element: buttonOverride, option: buttonOverride._optRef } : state.getOptionButton(playbackState.optionId);
+      if (!optionButton?.element || !optionButton?.option?.file) return;
+
+      await MediaPlayer.syncAudioToState(optionButton.option, optionButton.element, playbackState);
+    }
+
+    static async handleIncomingMessage(message) {
+      if (!message?.type) return;
+
+      if (message.type === "playback-state") {
+        await this.handleIncomingState(message.payload);
+        return;
+      }
+
+      if (message.type === "options-changed") {
+        await this.handleOptionsRevision(message.payload);
+      }
+    }
+
+    static async publishOptionsChanged() {
+      const payload = {
+        originTabId: this.tabId,
+        revision: this.createRevision(),
+      };
+      this.lastOptionsRevision = payload.revision;
+      await new Promise((resolve) => {
+        chrome.storage.local.set({ [CONFIG.SYNC.OPTIONS_REVISION_KEY]: payload }, resolve);
+      });
+      this.channel?.postMessage({ type: "options-changed", payload });
+    }
+
+    static async handleOptionsRevision(payload) {
+      if (!payload || payload.originTabId === this.tabId) return;
+      if (payload.revision <= this.lastOptionsRevision) return;
+      this.lastOptionsRevision = payload.revision;
+      await this.reconcileOptions();
+    }
+
+    static async reconcileOptions() {
+      if (!this.bar) return;
+
+      const options = await Database.loadAll();
+      const incomingIds = new Set(options.map((option) => option.id));
+
+      for (const option of options) {
+        const existingButton = state.getOptionButton(option.id);
+        if (existingButton) {
+          await existingButton.applyOptionUpdate(option);
+          continue;
+        }
+
+        const optionButton = new OptionButton(this.bar, option);
+        this.bar.appendChild(await optionButton.create());
+      }
+
+      for (const optionButton of [...state.optionButtons]) {
+        if (!incomingIds.has(optionButton.option.id)) {
+          optionButton.removeFromUI();
+        }
+      }
+
+      state.rebuildKeyboardAssignments();
+    }
+  }
+
   /* ========================== MEDIA ============================= */
   class MediaPlayer {
+    static syncAudioVisualState(option, button, audio) {
+      if (!option || !button || !audio) return;
+
+      const isPlaying = !audio.paused && !audio.ended;
+      state.setPlaying(button, isPlaying);
+      UIUtils.applyButtonColors(button, option);
+      this.updateProgressUI(button, audio);
+    }
+
+    static bindAudioEvents(option, button, audio) {
+      if (!audio) return;
+
+      audio._boundOption = option;
+      audio._boundButton = button;
+      if (audio._mlaEventsBound) return;
+
+      const syncState = (overrides = {}) => {
+        const currentOption = audio._boundOption;
+        const currentButton = audio._boundButton;
+        if (!currentOption || !currentButton) return;
+
+        this.syncAudioVisualState(currentOption, currentButton, audio);
+        if (audio._suppressSyncEvent) return;
+
+        SyncManager.publishPlaybackState(currentOption, audio, overrides).catch((err) => {
+          console.error("Sync publish failed:", err);
+        });
+      };
+
+      audio.addEventListener("play", () => {
+        syncState({ isPlaying: true });
+      });
+
+      audio.addEventListener("pause", () => {
+        if (audio.ended) return;
+        syncState({ isPlaying: false });
+      });
+
+      audio.addEventListener("ended", () => {
+        try {
+          audio.currentTime = 0;
+        } catch (err) {
+          console.error("Failed to reset audio:", err);
+        }
+        syncState({ isPlaying: false, currentTime: 0 });
+      });
+
+      audio.addEventListener("error", () => {
+        syncState({ isPlaying: false, currentTime: audio.currentTime || 0 });
+      });
+
+      audio._mlaEventsBound = true;
+    }
+
+    static async pauseOtherAudios(currentOptionId) {
+      for (const [optionId, audio] of state.audioMap.entries()) {
+        if (optionId === currentOptionId || !audio || audio.paused) continue;
+        audio.pause();
+      }
+    }
+
     static async play(option, button) {
       if (option.type === "file") return this.playAudio(option, button);
       alert("Chỉ hỗ trợ file MP3");
@@ -259,6 +560,7 @@
         audio.preload = 'metadata'; // Hint to load metadata
         state.setAudio(option.id, audio);
       }
+      this.bindAudioEvents(option, button, audio);
 
       // Update UI whenever time changes (seeking, playing, etc)
       const update = () => this.updateProgressUI(button, audio);
@@ -272,34 +574,99 @@
       }
     }
 
-    static playAudio(option, button) {
-      if (!option.file) {
-        alert("Không có file!");
-        return false;
-      }
-
-      let audio = state.getAudio(option.id);
-      if (!audio) {
-        // Should be created by preload, but just in case
-        this.preload(option, button);
-        audio = state.getAudio(option.id);
-        if (!audio) return false;
-      }
-
-      // Ensure volume is always up to date
-      audio.volume = option.volume ?? CONFIG.DEFAULT_VOLUME;
-
-      // Animation loop for smooth UI updates (60fps)
+    static startProgressAnimation(button, audio) {
       const animate = () => {
         if (audio.paused) return;
         this.updateProgressUI(button, audio);
         requestAnimationFrame(animate);
       };
 
+      requestAnimationFrame(animate);
+    }
+
+    static async ensureAudio(option, button) {
+      if (!option.file) return null;
+
+      let audio = state.getAudio(option.id);
+      if (!audio) {
+        this.preload(option, button);
+        audio = state.getAudio(option.id);
+      }
+      if (!audio) return null;
+
+      if (audio.readyState < 1) {
+        await new Promise((resolve) => {
+          const done = () => resolve();
+          audio.addEventListener('loadedmetadata', done, { once: true });
+          audio.addEventListener('error', done, { once: true });
+        });
+      }
+
+      return audio;
+    }
+
+    static async syncAudioToState(option, button, playbackState) {
+      const audio = await this.ensureAudio(option, button);
+      if (!audio) return false;
+
+      audio.volume = option.volume ?? CONFIG.DEFAULT_VOLUME;
+
+      let targetTime = playbackState.currentTime ?? 0;
+      if (playbackState.isPlaying) {
+        targetTime += Math.max(0, (Date.now() - playbackState.updatedAt) / 1000);
+      }
+
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        targetTime = Math.min(targetTime, Math.max(0, audio.duration - 0.05));
+      }
+      targetTime = Math.max(0, targetTime);
+
+      const shouldSeek = Math.abs(audio.currentTime - targetTime) > CONFIG.SYNC.MAX_DRIFT_SEC;
+      const shouldTogglePlayback = playbackState.isPlaying ? audio.paused : !audio.paused;
+
+      if (shouldSeek || shouldTogglePlayback) {
+        audio.currentTime = targetTime;
+      }
+
+      audio._suppressSyncEvent = true;
+      try {
+        if (playbackState.isPlaying) {
+          try {
+            await audio.play();
+            this.startProgressAnimation(button, audio);
+          } catch (err) {
+            console.error("Failed to sync audio:", err);
+            return false;
+          }
+        } else {
+          audio.pause();
+        }
+      } finally {
+        audio._suppressSyncEvent = false;
+      }
+
+      this.syncAudioVisualState(option, button, audio);
+      return true;
+    }
+
+    static async playAudio(option, button) {
+      if (!option.file) {
+        alert("Không có file!");
+        return false;
+      }
+
+      const audio = await this.ensureAudio(option, button);
+      if (!audio) return false;
+
+      // Ensure volume is always up to date
+      audio.volume = option.volume ?? CONFIG.DEFAULT_VOLUME;
+
       const playing = !audio.paused;
       if (playing) {
         audio.pause();
       } else {
+        await this.pauseOtherAudios(option.id);
+
         // Restart logic
         // If user manually sought, play from there. Otherwise restart.
         if (!audio._manualSeek) {
@@ -307,40 +674,21 @@
         }
         audio._manualSeek = false; // Reset flag after use
 
-        audio.play().then(() => {
-          requestAnimationFrame(animate);
+        const started = await audio.play().then(() => {
+          this.startProgressAnimation(button, audio);
+          return true;
         }).catch(err => {
           console.error("Failed to play audio:", err);
           alert("Không thể phát file audio!");
+          return false;
         });
-      }
 
-      // Reset progress on end
-      audio.onended = () => {
-        if (button) {
-          const bar = button.querySelector('.progress-fill');
-          const point = button.querySelector('.progress-point');
-          const timeText = button.querySelector('.time-display');
-
-          if (bar) bar.style.width = '0%';
-          if (point) point.style.left = '0%';
-          if (timeText && audio.duration) {
-            // Reset to 0:00 / total
-            const format = (s) => {
-              const m = Math.floor(s / 60);
-              const sec = Math.floor(s % 60);
-              return `${m}:${sec.toString().padStart(2, '0')}`;
-            };
-            timeText.textContent = `0:00 / ${format(audio.duration)}`;
-          }
-
-          // Update UI state to paused
-          state.setPlaying(button, false);
-          UIUtils.applyButtonColors(button, option);
+        if (!started) {
+          this.syncAudioVisualState(option, button, audio);
+          return false;
         }
-      };
-
-      state.setPlaying(button, !playing);
+      }
+      this.syncAudioVisualState(option, button, audio);
       return !playing;
     }
 
@@ -359,7 +707,7 @@
     static applyButtonColors(button, option) {
       button.style.background = state.isPlaying(button)
         ? option.playColor || CONFIG.COLORS.DEFAULT_PLAY
-        : CONFIG.COLORS.DEFAULT;
+        : option.color || CONFIG.COLORS.DEFAULT;
     }
 
     static createMenuItem(label, handler) {
@@ -445,7 +793,7 @@
       const res = await fetch(this.API_URL, {
         method: "POST",
         // mode: "no-cors", // Use standard CORS since we have host_permissions
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
         body: JSON.stringify(payload)
       });
       const endT = Date.now();
@@ -552,11 +900,18 @@
       this.element = null;
       this.menu = null;
       this.keyboardKey = null;
+      this.keySpan = null;
+      this.nameSpan = null;
+      this.volumeSlider = null;
     }
 
     async create() {
       // Register this button and get auto-assigned key
       this.keyboardKey = state.addOptionButton(this);
+      state.setOptionButton(this.option.id, this);
+      if (this.option.shortcutKey) {
+        this.keyboardKey = state.assignKeyToOption(this, this.option.shortcutKey) || this.keyboardKey;
+      }
 
       const btn = document.createElement("button");
       btn.style.cssText = `
@@ -573,13 +928,16 @@
       `;
       keySpan.textContent = this.keyboardKey || '';
       btn.appendChild(keySpan);
+      this.keySpan = keySpan;
 
       const nameSpan = document.createElement("span");
       nameSpan.textContent = this.option.name;
       btn.appendChild(nameSpan);
+      this.nameSpan = nameSpan;
 
       const vol = this.createVolumeSlider();
       btn.appendChild(vol);
+      this.volumeSlider = vol;
 
       const menuBtn = this.createMenuButton();
       btn.appendChild(menuBtn);
@@ -629,6 +987,9 @@
         if (audio && audio.duration) {
           audio.currentTime = percent * audio.duration;
           audio._manualSeek = true; // Flag to tell playAudio to resume
+          SyncManager.publishPlaybackState(this.option, audio, {
+            isPlaying: !audio.paused,
+          }).catch((err) => console.error("Sync publish failed:", err));
         }
       };
 
@@ -656,8 +1017,56 @@
 
       // Preload metadata to show duration
       MediaPlayer.preload(this.option, btn);
+      await SyncManager.restorePlaybackState(this.option, btn);
+      state.rebuildKeyboardAssignments();
 
       return btn;
+    }
+
+    async persistAndSync() {
+      this.option.updatedAt = Date.now();
+      await Database.save(this.option);
+      await SyncManager.publishOptionsChanged();
+    }
+
+    async applyOptionUpdate(nextOption) {
+      const previousFileUpdatedAt = this.option.fileUpdatedAt;
+      this.option = nextOption;
+      if (this.element) {
+        this.element._optRef = this.option;
+      }
+
+      if (this.nameSpan) this.nameSpan.textContent = this.option.name;
+      if (this.volumeSlider) this.volumeSlider.value = this.option.volume ?? CONFIG.DEFAULT_VOLUME;
+
+      const desiredKey = this.option.shortcutKey || null;
+      const currentKey = state.getKeyForOption(this) || null;
+      if (desiredKey !== currentKey) {
+        const assignedKey = state.assignKeyToOption(this, desiredKey) || '';
+        this.keyboardKey = assignedKey;
+        if (this.keySpan) this.keySpan.textContent = assignedKey;
+      }
+
+      state.rebuildKeyboardAssignments();
+
+      UIUtils.applyButtonColors(this.element, this.option);
+
+      if (previousFileUpdatedAt !== this.option.fileUpdatedAt) {
+        MediaPlayer.cleanup(this.option);
+        if (this.option.file) {
+          MediaPlayer.preload(this.option, this.element);
+          await SyncManager.restorePlaybackState(this.option, this.element);
+        }
+      }
+    }
+
+    removeFromUI() {
+      MediaPlayer.cleanup(this.option);
+      state.removeOptionFromKeyboard(this);
+      state.deleteOptionButton(this.option.id);
+      this.element?.remove();
+      this.menu?.remove();
+      state.rebuildKeyboardAssignments();
     }
 
     createVolumeSlider() {
@@ -673,7 +1082,7 @@
         this.option.volume = parseFloat(s.value);
         const audio = state.getAudio(this.option.id);
         if (audio) audio.volume = this.option.volume;
-        Database.save(this.option);
+        this.persistAndSync().catch((err) => console.error("Option save failed:", err));
       };
 
       return s;
@@ -744,14 +1153,9 @@
     }
 
     handleClick() {
-      this.bar.querySelectorAll("button.selected").forEach((btn) => {
-        btn.classList.remove("selected");
-        UIUtils.applyButtonColors(btn, btn._optRef);
+      MediaPlayer.play(this.option, this.element).catch((err) => {
+        console.error("Playback failed:", err);
       });
-
-      this.element.classList.add("selected");
-      MediaPlayer.play(this.option, this.element);
-      UIUtils.applyButtonColors(this.element, this.option);
     }
 
     async handleRename(nameSpan) {
@@ -759,7 +1163,7 @@
       if (newName?.trim()) {
         this.option.name = newName.trim();
         nameSpan.textContent = this.option.name;
-        await Database.save(this.option);
+        await this.persistAndSync();
       }
     }
 
@@ -772,6 +1176,7 @@
       if (newKey === '') {
         // Remove custom key, revert to auto-assignment
         const autoKey = state.assignKeyToOption(this);
+        this.option.shortcutKey = autoKey || null;
         keySpan.textContent = autoKey || '';
         this.keyboardKey = autoKey;
       } else if (/^[a-z0-9]$/i.test(newKey)) {
@@ -782,11 +1187,15 @@
           return;
         }
         state.assignKeyToOption(this, key);
+        this.option.shortcutKey = key;
         keySpan.textContent = key;
         this.keyboardKey = key;
       } else {
         alert('Chỉ chấp nhận 1 ký tự (a-z, 0-9)');
+        return;
       }
+
+      await this.persistAndSync();
     }
 
     async handleChangeColor() {
@@ -796,7 +1205,7 @@
         async (color) => {
           this.option.color = color;
           this.element.style.background = color;
-          await Database.save(this.option);
+          await this.persistAndSync();
         }
       );
     }
@@ -807,7 +1216,7 @@
         CONFIG.COLORS.PLAY_PALETTE,
         async (color) => {
           this.option.playColor = color;
-          await Database.save(this.option);
+          await this.persistAndSync();
         }
       );
     }
@@ -885,7 +1294,8 @@
         MediaPlayer.cleanup(this.option);
 
         this.option.file = file;
-        await Database.save(this.option);
+        this.option.fileUpdatedAt = Date.now();
+        await this.persistAndSync();
 
         // Preload new file
         MediaPlayer.preload(this.option, this.element);
@@ -895,11 +1305,9 @@
     }
 
     async handleDelete() {
-      MediaPlayer.cleanup(this.option);
       await Database.delete(this.option.id);
-      state.removeOptionFromKeyboard(this);
-      this.element.remove();
-      this.menu.remove();
+      this.removeFromUI();
+      await SyncManager.publishOptionsChanged();
     }
   }
 
@@ -922,6 +1330,7 @@
     `;
 
     document.body.appendChild(bar);
+    SyncManager.init(bar);
 
     // RESIZE HANDLE
     const handle = document.createElement("div");
@@ -1063,15 +1472,18 @@
       try {
         const option = {
           id: Date.now(),
+          order: Date.now(),
           name: "New",
           type: "file",
           volume: 1,
           color: CONFIG.COLORS.DEFAULT,
+          updatedAt: Date.now(),
         };
         await Database.save(option);
 
         const ob = new OptionButton(bar, option);
         bar.appendChild(await ob.create());
+        await SyncManager.publishOptionsChanged();
 
         // Auto-scroll/resize if overflow
         if (bar.scrollHeight > bar.offsetHeight) {

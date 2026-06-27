@@ -1,5 +1,10 @@
 #!/bin/bash
 
+set -e
+
+echo "Syncing manifest version from .env..."
+node scripts/sync-version.js
+
 # 1. Cleaner directory
 rm -rf dist
 mkdir -p dist/assets/js
@@ -30,7 +35,12 @@ sed -i 's|"style.css"|"assets/css/style.css"|' dist/manifest.json
 # Copy icons if you have them (check manifest)
 # cp icon*.png dist/assets/ 2>/dev/null
 
-# 4. Zip it
+# 4. Refresh unpacked extension folder
+rm -rf mla-soundbar
+mkdir -p mla-soundbar
+cp -r dist/. mla-soundbar/
+
+# 5. Zip it
 rm -f mla-soundbar.zip
 cd dist
 zip -r ../mla-soundbar.zip .
@@ -39,6 +49,8 @@ cd ..
 echo "========================================================"
 echo "Build Complete!"
 echo "Files organized in 'dist/' with 'assets/' folder."
+echo "Folder output refreshed at 'mla-soundbar/'."
+echo "Zip output created at 'mla-soundbar.zip'."
 echo "Manifest updated dynamically."
 echo "Using 'content.source.js' as the source for 'content.js'."
 echo "========================================================"
